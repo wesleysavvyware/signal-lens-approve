@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-at+s7fKLvsxc98wY7xN1QeVfLgBIj3XhbCkRFmlR4jg='; style-src 'sha256-kwCzJvmVI/CzkFsi5Gmrpvfqewpd+UmeS6EMibOOWcQ='; connect-src https://fdpqirqnqdzexfudcrsx.supabase.co; img-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="pco-api" content="https://fdpqirqnqdzexfudcrsx.supabase.co/functions/v1/owner-approve">
+<title>Approve changes</title>
+<style>
+:root{color-scheme:light dark;--bg:#fff;--fg:#111;--mut:#666;--line:#ddd;--ok:#0a7a3b;--no:#b42318;--card:#f6f6f6}
+@media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#aaa;--line:#333;--card:#1c1c1c}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,-apple-system,sans-serif}
+main{max-width:640px;margin:0 auto;padding:16px}h1{font-size:20px;margin:8px 0 16px}
+label{display:block;margin:12px 0 4px;color:var(--mut);font-size:14px}
+input{width:100%;font-size:17px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+button{font-size:17px;padding:14px 16px;border-radius:10px;border:0;width:100%;margin-top:12px;cursor:pointer}
+.go{background:var(--ok);color:#fff}.stop{background:transparent;color:var(--no);border:1px solid var(--no)}
+.plain{background:var(--card);color:var(--fg);border:1px solid var(--line)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:0 0 16px}
+.meta{color:var(--mut);font-size:13px;word-break:break-all}.item{border-top:1px solid var(--line);padding:10px 0}
+.item:first-of-type{border-top:0}.k{font-weight:600}pre{white-space:pre-wrap;word-break:break-word;font-size:12px;
+max-height:320px;overflow:auto;background:var(--bg);padding:8px;border-radius:6px;border:1px solid var(--line)}
+#msg{min-height:1.4em;color:var(--mut)}.hidden{display:none}
+</style></head>
+<body><main>
+<h1>Waiting for your tap</h1>
+<div id="in">
+<form id="f" autocomplete="on">
+<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required>
+<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+<label for="code">Code (only if you set up an authenticator app)</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6">
+<button class="go" type="submit">Sign in</button>
+</form>
+</div>
+<div id="list" class="hidden">
+<p id="count"></p>
+<div id="sets"></div>
+<div id="unlock"></div>
+<button class="plain" id="reload" type="button">Reload</button>
+<button class="plain" id="out" type="button">Sign out</button>
+</div>
+<p id="msg" role="status"></p>
+</main>
+<script>
+(function () {
+  "use strict";
+  if (window.top !== window.self) { document.body.textContent = "Open this page directly, not inside another page."; return; }
+  var meta = document.querySelector('meta[name="pco-api"]');
+  var API = (meta && meta.getAttribute("content")) || location.origin + location.pathname;
+  var token = null, ticket = null;
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; }
+  function say(t) { $("msg").textContent = t || ""; }
+  function call(op, body) {
+    var h = { "Content-Type": "application/json" };
+    if (token) h["Authorization"] = "Bearer " + token;
+    if (ticket) h["X-PCO-Approver"] = ticket;
+    var payload = Object.assign({ op: op }, body || {});
+    return fetch(API, { method: "POST", headers: h, body: JSON.stringify(payload), cache: "no-store",
+      credentials: "omit", referrerPolicy: "no-referrer", redirect: "error" })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j._status = r.status; return j; }); });
+  }
+  function when(iso) { var d = new Date(iso); return isNaN(d) ? String(iso) : d.toLocaleString(); }
+  var WHY = { safety: "it touches safety settings", frozen: "it changes a finished recipe", pinned: "it changes shared engine code",
+    replay: "it changes a recorded test result" };
+  var NEED = { safety_clear: "It may change shared safety code (never keys, roles, the allowlist, the checks or the queue)." };
+  var DOT = " " + String.fromCharCode(183) + " ";
+  function kindOf(s) {
+    if (s.job) return "job";
+    if (s.tested) return "tested";
+    if (s.items.every(function (it) { return it.kind === "clear"; })) return "add";
+    if (s.items.every(function (it) { return it.kind === "deploy" && it.from_sha; })) return "live";
+    return "mixed";
+  }
+  function item(it) {
+    var d = el("div", "item");
+    if (it.kind === "job") {
+      d.appendChild(el("div", "k", String.fromCharCode(8220) + it.title + String.fromCharCode(8221)));
+      if (it.origin === "chat") {
+        d.appendChild(el("div", "meta", "Written by the builder, not by you: check it is what you asked for in chat."));
+        d.appendChild(el("div", "meta", "From chat" + DOT + "job name " + String(it.branch || "") + DOT + "only this job"));
+      } else {
+        d.appendChild(el("div", "meta", "Work order " + String(it.order || "").slice(11, 19) + DOT + "only this job"));
+      }
+      d.appendChild(el("div", null, "It may add the job's own change (every check still runs)."));
+      (it.needs || []).forEach(function (n) { if (NEED[n]) d.appendChild(el("div", null, NEED[n])); });
+      var fns = (it.needs || []).filter(function (n) { return n.indexOf("go_live:") === 0; }).map(function (n) { return n.slice(8); });
+      d.appendChild(el("div", null, fns.length ? "Goes live after it is added: " + fns.join(", ") + "." : "Nothing goes live."));
+      d.appendChild(el("div", "meta", "Still asks you separately: money, sends, permanent deletes, new access, allowlist changes, spend over the cap, and anything else."));
+      d.appendChild(el("div", "meta", "Undo: " + it.undo));
+      return d;
+    }
+    if (it.kind === "golive") {
+      d.appendChild(el("div", "k", "Put live: " + it.name));
+      d.appendChild(el("div", null, it.summary));
+      return d;
+    }
+    if (it.kind === "clear") {
+      d.appendChild(el("div", "k", it.summary));
+      d.appendChild(el("div", "meta", "Name " + it.branch + " " + String.fromCharCode(183) + " version " + String(it.head || "").slice(0, 12)));
+      d.appendChild(el("div", "meta", "Waits for you because " + (it.reasons || []).map(function (r) { return WHY[r] || "of a safety rule"; }).join(" and ") + "."));
+      if ((it.paths || []).length) {
+        var dp = el("details"); dp.appendChild(el("summary", "meta", "Show the files it touches"));
+        dp.appendChild(el("pre", null, it.paths.join("\n"))); d.appendChild(dp);
+      }
+      d.appendChild(el("div", "meta", "Undo: " + it.undo));
+      return d;
+    }
+    d.appendChild(el("div", "k", (it.kind === "sql" ? "Database change: " : "Put live: ") + it.name));
+    d.appendChild(el("div", null, it.summary));
+    if (it.kind === "deploy" && it.from_sha) d.appendChild(el("div", "meta", "From the main line at " + it.from_sha.slice(0, 12)));
+    d.appendChild(el("div", "meta", "Undo: " + it.undo));
+    var det = el("details"); det.appendChild(el("summary", "meta", it.kind === "sql" ? "Show the exact SQL" : "Show the files"));
+    det.appendChild(el("pre", null, it.kind === "sql" ? it.sql : (it.files || []).map(function (f) { return f.sha256.slice(0, 12) + "  " + f.name; }).join("\n") + "\nverify_jwt=" + it.verify_jwt));
+    d.appendChild(det);
+    return d;
+  }
+  function decideOne(s, decision) {
+    return call("decide", { set_id: s.id, set_hash: s.set_hash, decision: decision });
+  }
+  function why(j) {
+    var e = String(j.error || j._status);
+    return e.indexOf("second_factor_required") === 0 ? "This one needs your 6-digit code: sign out, then sign in with the code." : "Not done: " + e;
+  }
+  function unlockBox(list) {
+    var u = $("unlock"); u.textContent = "";
+    var c = el("section", "card");
+    if (list.length) {
+      var x = list[0];
+      c.appendChild(el("div", "k", "Work-session unlock is on"));
+      c.appendChild(el("div", "meta", "Until " + when(x.until) + DOT + x.uses + " used so far"));
+      var end = el("button", "stop", "End it now");
+      end.addEventListener("click", function () {
+        end.disabled = true; say("Ending...");
+        call("unlock_end", { set_id: x.id }).then(function (j) { say(j.ok ? "Ended. A card lists what was done." : why(j)); load(); },
+          function () { say("No connection. Nothing changed."); end.disabled = false; });
+      });
+      c.appendChild(end);
+    } else {
+      c.appendChild(el("div", "k", "Work-session unlock"));
+      c.appendChild(el("div", null, "While it is on, the builder adds held changes and puts existing functions live again without asking you each time. Every check still runs."));
+      c.appendChild(el("div", "meta", "Still asks you each time: money, sends, permanent deletes, new access, new allowlist lines, spend over the cap, and changes to this approval code."));
+      [12, 24].forEach(function (h) {
+        var b = el("button", "plain", "Unlock for " + h + " hours");
+        b.addEventListener("click", function () {
+          b.disabled = true; say("Starting...");
+          call("unlock_start", { hours: h }).then(function (j) { say(j.ok ? "Unlocked until " + when(j.until) + "." : why(j)); load(); },
+            function () { say("No connection. Nothing changed."); b.disabled = false; });
+        });
+        c.appendChild(b);
+      });
+    }
+    u.appendChild(c);
+  }
+  function render(sets, unlocks) {
+    unlockBox(unlocks || []);
+    var box = $("sets"); box.textContent = "";
+    var open = sets.filter(function (s) { return s.status === "pending" && !s.expired; });
+    // a chat job card is the builder's own proposal: it is always tapped on its own, never in "Approve all"
+    // a tested set adds a change AND puts functions live on the builder's report: also tapped on its own
+    var good = open.filter(function (s) { return !s.damaged && !s.chat && !s.tested; });
+    $("count").textContent = open.length ? open.length + " waiting for your tap." : "Nothing is waiting.";
+    if (good.length > 1) {
+      var all = el("button", "go", "Approve all " + good.length);
+      all.addEventListener("click", function () {
+        all.disabled = true; say("Approving " + good.length + "...");
+        var done = 0, failed = [];
+        good.reduce(function (p, s) {
+          return p.then(function () { return decideOne(s, "approve").then(function (j) { if (j.ok) done++; else failed.push(why(j)); },
+            function () { failed.push("No connection."); }); });
+        }, Promise.resolve()).then(function () {
+          say("Approved " + done + " of " + good.length + "." + (failed.length ? " " + failed[0] : ""));
+          load();
+        });
+      });
+      box.appendChild(all);
+    }
+    open.forEach(function (s) {
+      var c = el("section", "card"), k = kindOf(s);
+      var n = s.items.length;
+      var live = k === "tested" ? s.items.filter(function (it) { return it.kind === "golive"; }).map(function (it) { return it.name; }) : [];
+      var fnWords = live.length + (live.length === 1 ? " function" : " functions");
+      c.appendChild(el("div", "k", k === "tested" ? "Tested. Add this change" + (live.length ? " and put it live (" + fnWords + ")" : "") :
+        k === "job" ? (s.chat ? "Approve this chat job" : "Approve this job") : k === "add" ? (n === 1 ? "Add this change" : "Add " + n + " changes") :
+        k === "live" ? "Put changes live (" + n + ")" : n + (n === 1 ? " change" : " changes")));
+      c.appendChild(el("div", "meta", "Expires " + when(s.expires_at) + " " + String.fromCharCode(183) + " set " + s.set_hash.slice(0, 12) +
+        (s.needs_code ? " " + String.fromCharCode(183) + " needs your 6-digit code" : "")));
+      if (s.damaged) c.appendChild(el("div", "meta", "Damaged: " + s.damaged + ". Do not approve."));
+      if (k === "tested") {
+        c.appendChild(el("div", null, "The builder reports that it ran every check on exactly this version before asking you."));
+        c.appendChild(el("div", null, live.length ? "One tap adds it and puts " + fnWords + " live: " + live.join(", ") + "." :
+          "One tap adds it. Nothing goes live."));
+        c.appendChild(el("div", "meta", "If the change itself is altered after your tap, the tap no longer counts and you are asked again."));
+        c.appendChild(el("div", "meta", "If other finished work was added meanwhile, the checks run again in full first, and a function only goes live if it is byte for byte what you approved."));
+      }
+      // a tested set is one card: its functions are named in the line above, not as separate blocks
+      s.items.forEach(function (it) { if (!(k === "tested" && it.kind === "golive")) c.appendChild(item(it)); });
+      var yes = el("button", "go", k === "tested" ? (live.length ? "Approve: add it and put it live" : "Approve: add it") : k === "job" ? "Approve this job" : k === "add" ? "Approve: add it" : k === "live" ? "Approve: put it live" : "Approve " + (n === 1 ? "this change" : "all " + n));
+      var no = el("button", "stop", "Reject");
+      yes.disabled = !!s.damaged;
+      function act(decision) {
+        yes.disabled = no.disabled = true; say(decision === "approve" ? "Approving..." : "Rejecting...");
+        decideOne(s, decision).then(function (j) {
+          if (j.ok) { say(decision === "approve" ? (k === "job" ? "Approved for 3 days, this job only." : k === "tested" ? "Approved for 12 hours, this version only." : "Approved for 12 hours, each change once.") +
+            (j.golive === "dispatched" ? " Going live now: about 3 to 5 minutes." : j.golive === "after_landing" ? (k === "tested" ? " It goes live by itself once it is added. No second tap." : " It goes live once the job is on the main line.") : "") : "Rejected."); load(); }
+          else { say(why(j)); yes.disabled = no.disabled = false; if (j._status === 401) signOut(); }
+        }, function () { say("No connection. Nothing changed."); yes.disabled = no.disabled = false; });
+      }
+      yes.addEventListener("click", function () { act("approve"); });
+      no.addEventListener("click", function () { act("reject"); });
+      c.appendChild(yes); c.appendChild(no);
+      box.appendChild(c);
+    });
+  }
+  function load() {
+    call("list").then(function (j) {
+      if (j._status === 401 || j._status === 403) { say("Sign in again (" + (j.error || j._status) + ")."); signOut(); return; }
+      if (!j.ok) { say("Could not load: " + (j.error || j._status)); return; }
+      render(j.sets || [], j.unlocks || []);
+    }, function () { say("No connection."); });
+  }
+  function signOut() { token = null; ticket = null; $("in").classList.remove("hidden"); $("list").classList.add("hidden"); }
+  $("f").addEventListener("submit", function (ev) {
+    ev.preventDefault(); say("Signing in...");
+    call("sign_in", { email: $("email").value, password: $("password").value, code: $("code").value }).then(function (j) {
+      $("password").value = ""; $("code").value = "";
+      if (!j.ok || !j.access_token || !j.ticket) {
+        say(j.error === "own_password_required" ? "Use a password only you know (not the one the system set up)." :
+          j.error === "code_required" ? "Enter the 6-digit code from your authenticator app." : "Sign-in failed.");
+        return;
+      }
+      token = j.access_token; ticket = j.ticket; say("");
+      $("in").classList.add("hidden"); $("list").classList.remove("hidden"); load();
+    }, function () { say("No connection."); });
+  });
+  $("reload").addEventListener("click", load);
+  $("out").addEventListener("click", function () { signOut(); say("Signed out."); });
+})();
+</script>
+</body></html>
